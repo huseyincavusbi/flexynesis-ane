@@ -44,6 +44,7 @@ class supervised_vae(pl.LightningModule):
                  surv_event_var = None, surv_time_var = None, use_loss_weighting = True,
                  device_type = None):
         super(supervised_vae, self).__init__()
+        self.loss_scale = 1.0
         self.config = config
         self.dataset = dataset
         self.target_variables = target_variables
@@ -291,8 +292,8 @@ class supervised_vae(pl.LightningModule):
         losses['train_loss'] = total_loss
         if log:
             self.log_dict(losses, on_step=False, on_epoch=True, prog_bar=True)
-        return total_loss
-    
+        return total_loss * self.loss_scale
+
     def validation_step(self, val_batch, batch_idx, log = True):
         """
         Executes one validation step using a single batch from the validation dataset.

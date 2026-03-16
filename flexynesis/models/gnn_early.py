@@ -67,6 +67,7 @@ class GNN(pl.LightningModule):
         gnn_conv_type = None 
     ):
         super().__init__()
+        self.loss_scale = 1.0
         self.config = config
         self.target_variables = target_variables
         self.surv_event_var = surv_event_var
@@ -170,7 +171,7 @@ class GNN(pl.LightningModule):
         losses["train_loss"] = total_loss
         if log:
             self.log_dict(losses, on_step=False, on_epoch=True, prog_bar=True, batch_size=len(batch))
-        return total_loss
+        return total_loss * self.loss_scale
 
     def validation_step(self, batch, batch_idx, log = True):
         """
