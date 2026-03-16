@@ -1846,13 +1846,15 @@ def get_optimal_device(device_preference=None):
     Automatically detect and return the optimal device for PyTorch operations.
 
     Args:
-        device_preference (str, optional): Preferred device type ('cuda', 'mps', 'cpu', 'auto').
+        device_preference (str, optional): Preferred device type ('cuda', 'mps', 'ane', 'cpu', 'auto').
                                          If None or 'auto', automatically selects the best available device.
+                                         'ane' uses Apple Neural Engine via private APIs (macOS only).
 
     Returns:
         tuple: (device_str, device_type) where:
-            - device_str: String suitable for torch.device() and PyTorch Lightning accelerator
-            - device_type: String indicating the device type for compatibility
+            - device_str: String suitable for torch.device() / PyTorch Lightning accelerator.
+                          For ANE this is 'cpu' (Lightning runs on CPU; ANE is used inside layers).
+            - device_type: String indicating the device type ('gpu', 'mps', 'ane', 'cpu').
     """
     if device_preference is None:
         device_preference = 'auto'
@@ -1868,10 +1870,18 @@ def get_optimal_device(device_preference=None):
             return 'mps', 'mps'
         else:
             warnings.warn("MPS requested but not available. Falling back to auto-detection.")
+    elif device_preference == 'ane':
+        from .ane import is_available as ane_available
+        if ane_available():
+            # Lightning accelerator stays 'cpu'; ANE is handled inside ANELinear layers
+            return 'cpu', 'ane'
+        else:
+            warnings.warn("ANE requested but not available (requires Apple Silicon + macOS). Falling back to auto-detection.")
     elif device_preference == 'cpu':
         return 'cpu', 'cpu'
 
     # Auto-detection logic (priority: CUDA > MPS > CPU)
+    # ANE is not included in auto-detection — must be explicitly requested via --device ane
     if torch.cuda.is_available():
         return 'cuda', 'gpu'
     elif torch.backends.mps.is_available():
