@@ -34,105 +34,126 @@ def build_network(expr_df, method='spearman', min_correlation=0.3, top_k=10, dev
     """
     Build co-expression network without storing full correlation matrix.
     Computes correlations in batches and immediately filters to save memory.
-    
+
     Args:
         expr_df: DataFrame with genes as rows, samples as columns
         method: 'spearman' or 'pearson'
         min_correlation: Minimum absolute correlation threshold
         top_k: Keep top K neighbors per gene
-        device: torch device (cuda/mps/cpu). Auto-detected if None.
-        
+        device: torch device or 'ane' for Apple Neural Engine. Auto-detected if None.
+
     Returns:
         List of edge dictionaries with GeneA, GeneB, Score
     """
-    # Auto-detect device if not specified
-    if device is None:
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-        elif torch.backends.mps.is_available():
-            device = torch.device('mps')
-        else:
-            device = torch.device('cpu')
-    
-    print(f"Using device: {device}")
+    use_ane = (device == 'ane')
+
+    if use_ane:
+        print("Using device: ane")
+        torch_device = torch.device('cpu')
+    else:
+        if device is None:
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+            elif torch.backends.mps.is_available():
+                device = torch.device('mps')
+            else:
+                device = torch.device('cpu')
+        torch_device = device
+        print(f"Using device: {device}")
+
     print(f"Calculating {method} correlations for {len(expr_df)} genes...")
-    
-    # Convert to torch tensor and move to GPU
-    data = torch.tensor(expr_df.values, dtype=torch.float32, device=device)
+
+    data = torch.tensor(expr_df.values, dtype=torch.float32, device=torch_device)
     n_genes = data.shape[0]
+    n_samples = data.shape[1]
     gene_names = expr_df.index.tolist()
-    
+
     if method == 'spearman':
-        # Convert to ranks for Spearman - process in batches with progress bar
         print("Computing ranks...")
-        batch_size = 5000
+        batch_size_rank = 5000
         ranks = torch.zeros_like(data)
         with tqdm(total=n_genes, desc="Converting to ranks") as pbar:
-            for i in range(0, n_genes, batch_size):
-                end_i = min(i + batch_size, n_genes)
+            for i in range(0, n_genes, batch_size_rank):
+                end_i = min(i + batch_size_rank, n_genes)
                 batch = data[i:end_i]
                 ranks[i:end_i] = torch.argsort(torch.argsort(batch, dim=1), dim=1).float()
                 pbar.update(end_i - i)
         data = ranks
     elif method != 'pearson':
         raise ValueError(f"Unknown method: {method}. Use 'spearman' or 'pearson'")
-    
-    # Standardize for correlation computation
+
     print("Standardizing data...")
     data_mean = data.mean(dim=1, keepdim=True)
     data_std = data.std(dim=1, keepdim=True, unbiased=False)
     data_normalized = (data - data_mean) / (data_std + 1e-8)
-    
-    # Compute correlations in batches and extract top-k on the fly
-    batch_size = 1000  # Process 1000 genes at a time
+
+    batch_size = 1000
     edges = []
-    
+
     print(f"Computing correlations and building network (min |r| = {min_correlation}, top {top_k} per gene)...")
-    with tqdm(total=n_genes, desc="Processing genes") as pbar:
-        for i in range(0, n_genes, batch_size):
-            end_i = min(i + batch_size, n_genes)
-            batch = data_normalized[i:end_i]
-            
-            # Compute correlation for this batch with all genes
-            corr_batch = torch.mm(batch, data_normalized.T) / data.shape[1]
-            
-            # Process each gene in the batch
-            for local_idx, global_idx in enumerate(range(i, end_i)):
-                gene_corr = corr_batch[local_idx]
-                gene_name = gene_names[global_idx]
-                
-                # Remove self-correlation
-                gene_corr[global_idx] = 0
-                
-                # Get absolute correlations
-                abs_corr = gene_corr.abs()
-                
-                # Filter by threshold
-                mask = abs_corr >= min_correlation
-                
-                # Get top-k
-                if mask.sum() > top_k:
-                    # Get indices of top-k values
-                    top_k_values, top_k_indices = torch.topk(abs_corr, min(top_k, len(abs_corr)))
-                    # Filter to only those above threshold
-                    valid_mask = top_k_values >= min_correlation
-                    top_k_indices = top_k_indices[valid_mask]
-                else:
-                    # All values above threshold
-                    top_k_indices = torch.where(mask)[0]
-                
-                # Add edges
-                for neighbor_idx in top_k_indices:
-                    neighbor_idx = neighbor_idx.item()
-                    score = abs_corr[neighbor_idx].item()
-                    edges.append({
-                        'GeneA': gene_name,
-                        'GeneB': gene_names[neighbor_idx],
-                        'Score': score
-                    })
-            
-            pbar.update(end_i - i)
-    
+
+    if use_ane:
+        from .ane.linear import _run_matmul
+        # data_normalized is (n_genes, n_samples) — constant throughout all batches.
+        # Treat data_normalized.T as the "weight matrix" W: (n_samples, n_genes).
+        # Each batch of query genes is the "activation" x: (batch, n_samples).
+        # Result: x @ W = (batch, n_genes) — compile once, reuse across all batches.
+        data_np = data_normalized.cpu().numpy()       # (n_genes, n_samples)
+        W_np = np.ascontiguousarray(data_np.T)        # (n_samples, n_genes)
+
+        with tqdm(total=n_genes, desc="Processing genes") as pbar:
+            for i in range(0, n_genes, batch_size):
+                end_i = min(i + batch_size, n_genes)
+                actual_batch = end_i - i
+                batch_np = data_np[i:end_i]           # (actual_batch, n_samples)
+
+                corr_np = _run_matmul(n_samples, n_genes, actual_batch, batch_np, W_np)
+                corr_batch = torch.from_numpy(corr_np / n_samples)  # normalise → correlation
+
+                for local_idx, global_idx in enumerate(range(i, end_i)):
+                    gene_corr = corr_batch[local_idx].clone()
+                    gene_name = gene_names[global_idx]
+                    gene_corr[global_idx] = 0
+                    abs_corr = gene_corr.abs()
+                    mask = abs_corr >= min_correlation
+                    if mask.sum() > top_k:
+                        top_k_values, top_k_indices = torch.topk(abs_corr, min(top_k, len(abs_corr)))
+                        valid_mask = top_k_values >= min_correlation
+                        top_k_indices = top_k_indices[valid_mask]
+                    else:
+                        top_k_indices = torch.where(mask)[0]
+                    for neighbor_idx in top_k_indices:
+                        neighbor_idx = neighbor_idx.item()
+                        score = abs_corr[neighbor_idx].item()
+                        edges.append({'GeneA': gene_name, 'GeneB': gene_names[neighbor_idx], 'Score': score})
+
+                pbar.update(end_i - i)
+    else:
+        with tqdm(total=n_genes, desc="Processing genes") as pbar:
+            for i in range(0, n_genes, batch_size):
+                end_i = min(i + batch_size, n_genes)
+                batch = data_normalized[i:end_i]
+                corr_batch = torch.mm(batch, data_normalized.T) / n_samples
+
+                for local_idx, global_idx in enumerate(range(i, end_i)):
+                    gene_corr = corr_batch[local_idx]
+                    gene_name = gene_names[global_idx]
+                    gene_corr[global_idx] = 0
+                    abs_corr = gene_corr.abs()
+                    mask = abs_corr >= min_correlation
+                    if mask.sum() > top_k:
+                        top_k_values, top_k_indices = torch.topk(abs_corr, min(top_k, len(abs_corr)))
+                        valid_mask = top_k_values >= min_correlation
+                        top_k_indices = top_k_indices[valid_mask]
+                    else:
+                        top_k_indices = torch.where(mask)[0]
+                    for neighbor_idx in top_k_indices:
+                        neighbor_idx = neighbor_idx.item()
+                        score = abs_corr[neighbor_idx].item()
+                        edges.append({'GeneA': gene_name, 'GeneB': gene_names[neighbor_idx], 'Score': score})
+
+                pbar.update(end_i - i)
+
     return edges
 
 
@@ -186,13 +207,21 @@ def generate_coexpression_network(
         expr_df = expr_df.dropna()
         print(f"  [INFO] Retained {expr_df.shape[0]} genes ({genes_with_na} genes removed)")
     
+    # Auto-detect ANE; fall back to MPS/CPU
+    try:
+        from .ane import is_available as ane_available
+        ane_device = 'ane' if ane_available() else None
+    except ImportError:
+        ane_device = None
+
     # Build network directly
     print(f"\n[2/3] Building network...")
     edges = build_network(
         expr_df,
         method=method,
         min_correlation=min_correlation,
-        top_k=top_k
+        top_k=top_k,
+        device=ane_device,
     )
     
     # Create dataframe
