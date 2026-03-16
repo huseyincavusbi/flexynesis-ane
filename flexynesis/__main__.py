@@ -815,7 +815,7 @@ def main():
             holdout_dataset = test_dataset.subset(holdout_indices)
 
             # fine tune on the finetuning dataset; freeze the encoders
-            finetuner = FineTuner(model, finetune_dataset)
+            finetuner = FineTuner(model, finetune_dataset, device_type=device_type)
             finetuner.run_experiments()
 
             # update the model to finetuned model
