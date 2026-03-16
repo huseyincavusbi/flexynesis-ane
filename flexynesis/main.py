@@ -113,14 +113,18 @@ class HyperparameterTuning:
         # Automatically disable multiprocessing on macOS in GHA to prevent permission error.
         import os
         import platform
-        if (platform.system() == 'Darwin' 
-            and os.environ.get("GITHUB_ACTIONS") == "true" 
+        if (platform.system() == 'Darwin'
+            and os.environ.get("GITHUB_ACTIONS") == "true"
             and num_workers > 0):
             import warnings
             warnings.warn(
                 f"Detected macOS in GHA: Setting num_workers=0 (was {num_workers}) to avoid permission error in GHA.",
                 UserWarning
             )
+            num_workers = 0
+        # ANE bridge (XPC service + ctypes dylib) cannot be shared across fork()ed workers.
+        # MPS tensors also cannot be pickled/shared across DataLoader worker processes on macOS.
+        if device_type in ('ane', 'mps') and num_workers > 0:
             num_workers = 0
         self.num_workers = num_workers
         
@@ -153,6 +157,20 @@ class HyperparameterTuning:
         s = Categorical([np.power(2, x) for x in range(st, end+1)], name = 'batch_size')
         return s
     
+    def _apply_ane(self, model):
+        """
+        If device_type is 'ane', swap all eligible nn.Linear layers to ANELinear
+        and set model.loss_scale to prevent fp16 gradient underflow during backward.
+        Called after every model construction.
+        """
+        if self.device_type != 'ane':
+            return model
+        from .ane import swap_linear_layers, count_linear_depth
+        swap_linear_layers(model, min_features=64)
+        depth = max(count_linear_depth(model), 1)
+        model.loss_scale = 256.0 * depth
+        return model
+
     def setup_trainer(self, params, current_step, total_steps, full_train = False):
         # Configure callbacks and trainer for the current fold
         mycallbacks = []
@@ -179,7 +197,7 @@ class HyperparameterTuning:
             logger=False,
             enable_checkpointing=False,
             devices=1,
-            accelerator=self.device_type
+            accelerator='cpu' if self.device_type == 'ane' else self.device_type
         )
         return trainer, early_stop_callback
     
@@ -204,9 +222,9 @@ class HyperparameterTuning:
 
         if full_train:
             # Train on the full dataset
-            full_loader = self.DataLoader(self.loader_dataset, batch_size=int(params['batch_size']), 
+            full_loader = self.DataLoader(self.loader_dataset, batch_size=int(params['batch_size']),
                                      shuffle=True, pin_memory=True, drop_last=True)
-            model = self.model_class(**model_args)
+            model = self._apply_ane(self.model_class(**model_args))
             trainer, _ = self.setup_trainer(params, current_step, total_steps, full_train = True)
             trainer.fit(model, train_dataloaders=full_loader)
             return model  # Return the trained model
@@ -238,11 +256,11 @@ class HyperparameterTuning:
                                              pin_memory=True, shuffle=False, num_workers = self.num_workers, prefetch_factor = None, 
                                              persistent_workers = self.num_workers > 0)
 
-                model = self.model_class(**model_args)
+                model = self._apply_ane(self.model_class(**model_args))
                 trainer, early_stop_callback = self.setup_trainer(params, current_step, total_steps)
                 print(f"[INFO] hpo config:{params}")
                 trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-                if early_stop_callback.stopped_epoch:
+                if early_stop_callback and early_stop_callback.stopped_epoch:
                     epochs.append(early_stop_callback.stopped_epoch)
                 else:
                     epochs.append(int(params['epochs']))
