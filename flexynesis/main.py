@@ -400,27 +400,37 @@ class FineTuner(pl.LightningModule):
         run_experiments(): Executes the finetuning process across all configurations and learning rates, evaluates
                            using cross-validation, and selects the best configuration based on validation loss.
     """
-    def __init__(self, model, dataset, n_splits=5, batch_size=32, learning_rates=None, max_epoch = 50, freeze_configs = None):
+    def __init__(self, model, dataset, n_splits=5, batch_size=32, learning_rates=None, max_epoch = 50, freeze_configs = None, device_type=None):
         super().__init__()
         logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
-        self.original_model = model 
+        self.device_type = device_type
+        self.original_model = model
         self.dataset = dataset  # Use the entire dataset
         self.n_splits = n_splits
         self.batch_size = batch_size
         self.kfold = KFold(n_splits=self.n_splits, shuffle=True)
         self.learning_rates = learning_rates if learning_rates else [model.config['lr'], model.config['lr']/10, model.config['lr']/100]
-        self.folds_data = list(self.kfold.split(np.arange(len(self.dataset))))            
+        self.folds_data = list(self.kfold.split(np.arange(len(self.dataset))))
         self.max_epoch = max_epoch
         self.freeze_configs = freeze_configs if freeze_configs else [
                     {'encoders': True, 'supervisors': False},
                     {'encoders': False, 'supervisors': True},
                     {'encoders': False, 'supervisors': False}
                 ]
-        
+
         if model.__class__.__name__ == 'MultiTripletNetwork':
             # modify dataset structure to accommodate TripletNetworks
             self.dataset = TripletMultiOmicDataset(dataset, model.main_var)
     
+    def _apply_ane(self, model):
+        if self.device_type != 'ane':
+            return model
+        from .ane import swap_linear_layers, count_linear_depth
+        swap_linear_layers(model, min_features=64)
+        depth = max(count_linear_depth(model), 1)
+        model.loss_scale = 256.0 * depth
+        return model
+
     def apply_freeze_config(self, config):
         # Freeze or unfreeze encoders
         for encoder in self.model.encoders:
@@ -436,13 +446,15 @@ class FineTuner(pl.LightningModule):
         # Override to load data for the current fold
         train_idx, val_idx = self.folds_data[self.current_fold]
         train_subset = torch.utils.data.Subset(self.dataset, train_idx)
-        return DataLoader(train_subset, batch_size=self.batch_size, shuffle=True)
+        num_workers = 0 if self.device_type in ('ane', 'mps') else 2
+        return DataLoader(train_subset, batch_size=self.batch_size, shuffle=True, num_workers=num_workers)
 
     def val_dataloader(self):
         # Override to load validation data for the current fold
         train_idx, val_idx = self.folds_data[self.current_fold]
         val_subset = torch.utils.data.Subset(self.dataset, val_idx)
-        return DataLoader(val_subset, batch_size=self.batch_size)
+        num_workers = 0 if self.device_type in ('ane', 'mps') else 2
+        return DataLoader(val_subset, batch_size=self.batch_size, num_workers=num_workers)
 
     def training_step(self, batch, batch_idx):
         return self.model.training_step(batch, batch_idx, log=False)
@@ -464,8 +476,9 @@ class FineTuner(pl.LightningModule):
                 epochs = [] # record how many epochs the training happened
                 for fold in range(self.n_splits):
                     model_copy = copy.deepcopy(self.original_model)  # Deep copy the model for each fold
+                    self._apply_ane(model_copy)
                     self.model = model_copy
-                    self.apply_freeze_config(config) # try freezing different components 
+                    self.apply_freeze_config(config) # try freezing different components
                     self.current_fold = fold
                     self.learning_rate = lr
                     early_stopping = EarlyStopping(
@@ -474,7 +487,8 @@ class FineTuner(pl.LightningModule):
                         verbose=False,
                         mode='min'
                     )
-                    trainer = pl.Trainer(max_epochs=self.max_epoch, devices=1, accelerator='auto', logger=False, enable_checkpointing=False, 
+                    ft_accelerator = 'cpu' if self.device_type == 'ane' else 'auto'
+                    trainer = pl.Trainer(max_epochs=self.max_epoch, devices=1, accelerator=ft_accelerator, logger=False, enable_checkpointing=False,
                                         enable_progress_bar = False, enable_model_summary=False, callbacks=[early_stopping])
                     trainer.fit(self, train_dataloaders=self.train_dataloader(), val_dataloaders=self.val_dataloader())
                     stopped_epoch = early_stopping.stopped_epoch
@@ -497,8 +511,10 @@ class FineTuner(pl.LightningModule):
         self.model = final_model
         self.learning_rate = best_config['learning_rate']
         self.apply_freeze_config(best_config['freeze']) 
-        dl = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
-        final_trainer = pl.Trainer(max_epochs=best_config['epochs'], devices=1, accelerator='auto', logger=False, enable_checkpointing=False)
+        num_workers = 0 if self.device_type in ('ane', 'mps') else 2
+        dl = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True, num_workers=num_workers)
+        ft_accelerator = 'cpu' if self.device_type == 'ane' else 'auto'
+        final_trainer = pl.Trainer(max_epochs=best_config['epochs'], devices=1, accelerator=ft_accelerator, logger=False, enable_checkpointing=False)
         final_trainer.fit(self, train_dataloaders=dl)
         
         
