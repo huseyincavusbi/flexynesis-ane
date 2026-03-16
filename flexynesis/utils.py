@@ -1952,5 +1952,7 @@ def create_device_from_string(device_str):
         else:
             warnings.warn("CUDA not available, falling back to CPU")
             return torch.device('cpu')
+    elif device_str == 'ane':
+        return torch.device('cpu')
     else:
         return torch.device('cpu')
