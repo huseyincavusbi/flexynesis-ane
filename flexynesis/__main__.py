@@ -37,7 +37,7 @@ def print_help():
     print("  --data_types DATA_TYPES")
     print("                        (Required) Which omic data matrices to work on, comma-separated: e.g. 'gex,cnv'")
     print("  --hpo_iter HPO_ITER   Number of iterations for hyperparameter optimisation (default: 100)")
-    print("  --device {auto,cuda,mps,cpu}")
+    print("  --device {auto,cuda,mps,ane,cpu}")
     print("                        Device type: 'auto' (automatic detection), 'cuda' (NVIDIA GPU), 'mps' (Apple Silicon), 'cpu' (default: auto)")
     print("  --use_gpu             (Optional) DEPRECATED: Use --device instead. If set, attempts to use CUDA/GPU if available.")
     print()
@@ -128,7 +128,7 @@ def print_full_help():
     print("  --threads THREADS     (Optional) How many threads to use when using CPU (default is 4)")
     print("  --num_workers NUM_WORKERS")
     print("                        (Optional) How many workers to use for model training (default is 0)")
-    print("  --device {auto,cuda,mps,cpu}")
+    print("  --device {auto,cuda,mps,ane,cpu}")
     print("                        Device type: 'auto' (automatic detection), 'cuda' (NVIDIA GPU), 'mps' (Apple Silicon), 'cpu' (default: auto)")
     print("  --use_gpu             (Optional) DEPRECATED: Use --device instead. If set, attempts to use CUDA/GPU if available.")
     print("  --feature_importance_method {IntegratedGradients,GradientShap,Both}")
@@ -405,8 +405,8 @@ def main():
     parser.add_argument("--use_gpu", action="store_true",
                         help="(Optional) DEPRECATED: Use --device instead. If set, attempts to use CUDA/GPU if available.")
     parser.add_argument("--device", type=str,
-                        choices=["auto", "cuda", "mps", "cpu"], default="auto",
-                        help="Device type: 'auto' (automatic detection), 'cuda' (NVIDIA GPU), 'mps' (Apple Silicon), 'cpu'")
+                        choices=["auto", "cuda", "mps", "ane", "cpu"], default="auto",
+                        help="Device type: 'auto' (automatic detection), 'cuda' (NVIDIA GPU), 'mps' (Apple Silicon GPU), 'ane' (Apple Neural Engine, macOS only), 'cpu'")
     parser.add_argument("--feature_importance_method", type=str,
                         choices=["IntegratedGradients", "GradientShap", "Both"], default="IntegratedGradients",
                         help="Choose feature importance score method")
