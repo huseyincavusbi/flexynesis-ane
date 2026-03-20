@@ -64,6 +64,9 @@ test = [
 [tool.setuptools.packages.find]
 include = ["flexynesis", "flexynesis.*"]
 
+[tool.setuptools.package-data]
+"flexynesis.ane" = ["libane_bridge.dylib"]
+
 [tool.pytest.ini_options]
 norecursedirs = [
     ".git",

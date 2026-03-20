@@ -7,10 +7,8 @@ import os
 import numpy as np
 from pathlib import Path
 
-# Resolve dylib: check package-local copy first, then ANE repo sibling directory
+# Resolve dylib: bundled alongside this file
 _DYLIB = Path(__file__).parent / "libane_bridge.dylib"
-if not _DYLIB.exists():
-    _DYLIB = Path(__file__).parent.parent.parent.parent / "ANE" / "bridge" / "libane_bridge.dylib"
 
 _lib = None
 _initialized = False
