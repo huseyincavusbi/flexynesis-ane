@@ -22,7 +22,7 @@ def _load():
     if not _DYLIB.exists():
         raise FileNotFoundError(
             f"libane_bridge.dylib not found at {_DYLIB}\n"
-            "Run: cd ANE/bridge && make"
+            "Reinstall the package: pip install --force-reinstall flexynesis-ane"
         )
 
     _lib = ctypes.CDLL(str(_DYLIB))
