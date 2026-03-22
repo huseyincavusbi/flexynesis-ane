@@ -14,9 +14,18 @@ Usage:
 def is_available() -> bool:
     """Return True if ANE bridge can be loaded and initialised."""
     try:
-        from .bridge import init
+        from .bridge import init, compile_kernel, free_kernel
+        from . import mil
         init()
-        return True
+        try:
+            mt = mil.dynamic_linear(64, 64, 64)
+            ib = mil.input_bytes(64, 64, 64)
+            ob = mil.output_bytes(64, 64)
+            handle = compile_kernel(mt, ib, ob)
+            free_kernel(handle)
+            return True
+        except RuntimeError:
+            return False
     except Exception:
         return False
 
